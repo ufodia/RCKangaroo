@@ -6,7 +6,7 @@ It's part #3 of my research, you can find more details here: https://github.com/
 
 Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 
-Features:
+<b>Features:</b>
 
 - Lowest K=1.15, it means 1.8 times less required operations compared to classic method with K=2.1, also it means that you need 1.8 times less memory to store DPs.
 - Fast, about 8GKeys/s on RTX 4090.
@@ -14,7 +14,7 @@ Features:
 - Supports ranges up to 170 bits.
 - Both Windows and Linux are supported.
 
-Limitations:
+<b>Limitations:</b>
 
 - Only RTX 40xx and newer GPUs are supported.
 - No advanced features like networking, saving/loading DPs, etc.
