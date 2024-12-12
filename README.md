@@ -19,7 +19,7 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 - Only RTX 40xx and newer GPUs are supported.
 - No advanced features like networking, saving/loading DPs, etc.
 
-Command line parameters:
+<b>Command line parameters:</b>
 
 <b>-gpu</b>		which GPUs are used, for example, "035" means that GPUs #0, #3 and #5 are used. If not specified, all available GPUs are used. 
 
