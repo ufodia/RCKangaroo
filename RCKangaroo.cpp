@@ -96,9 +96,9 @@ void InitGpus()
 		cudaGetDeviceProperties(&deviceProp, i);
 		printf("GPU %d: %s, %.2f GB, %d CUs, cap %d.%d, PCI %d, L2 size: %d KB\r\n", i, deviceProp.name, ((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f, deviceProp.multiProcessorCount, deviceProp.major, deviceProp.minor, deviceProp.pciBusID, deviceProp.l2CacheSize / 1024);
 		
-		if (deviceProp.l2CacheSize < 16 * 1024 * 1024) //we need large L2 cache which is available for ADA and later. 16MB means RTX4050, the slowest card with minimal L2
+		if (deviceProp.major < 8)
 		{
-			printf("GPU %d - L2 cache size is too small for this application, skip\r\n", i);
+			printf("GPU %d - not supported, skip\r\n", i);
 			continue;
 		}
 
@@ -536,12 +536,12 @@ int main(int argc, char* argv[])
 #endif
 
 	printf("********************************************************************************\r\n");
-	printf("*                    RCKangaroo v1.0  (c) 2024 RetiredCoder                    *\r\n");
+	printf("*                    RCKangaroo v1.1  (c) 2024 RetiredCoder                    *\r\n");
 	printf("********************************************************************************\r\n\r\n");
 
 	printf("This software is free and open-source: https://github.com/RetiredC\r\n");
 	printf("It demonstrates fast GPU implementation of SOTA Kangaroo method for solving ECDLP\r\n");
-	printf("NOTE: Only RTX 40xx and newer cards are supported.\r\n\r\n");
+	printf("NOTE: Only RTX 40xx and 30xx cards are supported.\r\n\r\n");
 #ifdef DEBUG_MODE
 	printf("DEBUG MODE\r\n\r\n");
 #endif

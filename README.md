@@ -16,7 +16,7 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 
 <b>Limitations:</b>
 
-- Only RTX 40xx and newer GPUs are supported.
+- Only RTX 40xx and 30xx GPUs are supported, but the software is optimized for 40xx only, so 30xx cards have bad speed.
 - No advanced features like networking, saving/loading DPs, etc.
 
 <b>Command line parameters:</b>
