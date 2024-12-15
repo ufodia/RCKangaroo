@@ -314,9 +314,9 @@ __global__ void KernelB(const TKparams Kparams)
 
 		//calc original kang_ind
 		u32 tind = (THREAD_X + gr_ind2 * BLOCK_SIZE); //0..3071
-		u32 warp_ind = tind / 384; // 0..7	
+		u32 warp_ind = tind / (32 * PNT_GROUP_CNT / 2); // 0..7	
 		u32 thr_ind = (tind / 4) % 32; //index in warp 0..31
-		u32 g8_ind = (tind % 384) / 128; // 0..2
+		u32 g8_ind = (tind % (32 * PNT_GROUP_CNT / 2)) / 128; // 0..2
 		u32 gr_ind = 2 * (tind % 4); // 0, 2, 4, 6
 
 		u32 kang_ind = (BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT;

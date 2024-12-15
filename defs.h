@@ -20,6 +20,8 @@ typedef char i8;
 
 #define MAX_GPU_CNT			32
 #define BLOCK_SIZE			256
+
+//must be divisible by 8
 #define PNT_GROUP_CNT		24
 
 #define LDS_SIZE_A			(68 * 1024)
