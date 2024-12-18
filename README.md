@@ -38,3 +38,12 @@ Sample command line for puzzle #85:
 RCKangaroo.exe -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4574a4fd8c810b7e42a4b398882b381bcd85e40c6883712912d167c83e73a
 
 
+Some notes:
+
+Fastest ECDLP solvers will always use SOTA method, as it's 1.39 times faster and requires less memory for DPs compared to the best 3-way kangaroos with K=1.6. 
+Even if you already have a faster implementation of kangaroo jumps, incorporating SOTA method will improve it further. 
+While adding the necessary loop-handling code will cause you to lose about 5–15% of your current speed, the SOTA method itself will provide a 39% performance increase. 
+Overall, this translates to roughly a 25% net improvement, which should not be ignored if your goal is to build a truly fast solver. 
+
+
+

@@ -3,7 +3,7 @@ NVCC := /usr/local/cuda-12.0/bin/nvcc
 CUDA_PATH ?= /usr/local/cuda-12.0
 
 CCFLAGS := -O3 -I$(CUDA_PATH)/include
-NVCCFLAGS := -O3 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_86,code=compute_86
+NVCCFLAGS := -O3 -gencode=arch=compute_89,code=compute_89 -gencode=arch=compute_86,code=compute_86 -gencode=arch=compute_75,code=compute_75
 LDFLAGS := -L$(CUDA_PATH)/lib64 -lcudart -pthread
 
 CPU_SRC := RCKangaroo.cpp GpuKang.cpp Ec.cpp utils.cpp
@@ -12,7 +12,7 @@ GPU_SRC := RCGpuCore.cu
 CPP_OBJECTS := $(CPU_SRC:.cpp=.o)
 CU_OBJECTS := $(GPU_SRC:.cu=.o)
 
-TARGET := RCKangaroo
+TARGET := rckangaroo
 
 all: $(TARGET)
 
@@ -26,4 +26,4 @@ $(TARGET): $(CPP_OBJECTS) $(CU_OBJECTS)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(CPP_OBJECTS) $(CU_OBJECTS) $(TARGET) 
+	rm -f $(CPP_OBJECTS) $(CU_OBJECTS)
