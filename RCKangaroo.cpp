@@ -96,7 +96,7 @@ void InitGpus()
 		cudaGetDeviceProperties(&deviceProp, i);
 		printf("GPU %d: %s, %.2f GB, %d CUs, cap %d.%d, PCI %d, L2 size: %d KB\r\n", i, deviceProp.name, ((float)(deviceProp.totalGlobalMem / (1024 * 1024))) / 1024.0f, deviceProp.multiProcessorCount, deviceProp.major, deviceProp.minor, deviceProp.pciBusID, deviceProp.l2CacheSize / 1024);
 		
-		if (deviceProp.major < 8)
+		if (deviceProp.major < 6)
 		{
 			printf("GPU %d - not supported, skip\r\n", i);
 			continue;
@@ -108,7 +108,7 @@ void InitGpus()
 		GpuKangs[GpuCnt]->CudaIndex = i;
 		GpuKangs[GpuCnt]->persistingL2CacheMaxSize = deviceProp.persistingL2CacheMaxSize;
 		GpuKangs[GpuCnt]->mpCnt = deviceProp.multiProcessorCount;
-		GpuKangs[GpuCnt]->KangCnt = BLOCK_SIZE * PNT_GROUP_CNT * deviceProp.multiProcessorCount;
+		GpuKangs[GpuCnt]->IsOldGpu = deviceProp.l2CacheSize < 16 * 1024 * 1024;
 		GpuCnt++;
 	}
 	printf("Total GPUs for work: %d\r\n", GpuCnt);
@@ -271,7 +271,7 @@ void CheckNewPoints()
 void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 {
 #ifdef DEBUG_MODE
-	for (int i = 0; i < 256; i++)
+	for (int i = 0; i <= MD_LEN; i++)
 	{
 		u64 val = 0;
 		for (int j = 0; j < GpuCnt; j++)
@@ -286,12 +286,11 @@ void ShowStats(u64 tm_start, double exp_ops, double dp_val)
 	int speed = GpuKangs[0]->GetStatsSpeed();
 	for (int i = 1; i < GpuCnt; i++)
 		speed += GpuKangs[i]->GetStatsSpeed();
-	if (!speed)
-		return;
 
 	u64 est_dps_cnt = (u64)(exp_ops / dp_val);
-
-	u64 exp_sec = (u64)((exp_ops / 1000000) / speed); //in sec
+	u64 exp_sec = 0xFFFFFFFFFFFFFFFFull;
+	if (speed)
+		exp_sec = (u64)((exp_ops / 1000000) / speed); //in sec
 	u64 exp_days = exp_sec / (3600 * 24);
 	int exp_hours = (int)(exp_sec - exp_days * (3600 * 24)) / 3600;
 	int exp_min = (int)(exp_sec - exp_days * (3600 * 24) - exp_hours * 3600) / 60;
@@ -325,12 +324,12 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	ram /= (1024 * 1024 * 1024); //GB
 	printf("SOTA method, estimated ops: 2^%.3f, RAM for DPs: %.3f GB. DP and GPU overheads not included!\r\n", log2(ops), ram);
 
-	u64 total_kangs = GpuKangs[0]->KangCnt;
+	u64 total_kangs = GpuKangs[0]->CalcKangCnt();
 	for (int i = 1; i < GpuCnt; i++)
-		total_kangs += GpuKangs[i]->KangCnt;
+		total_kangs += GpuKangs[i]->CalcKangCnt();
 	double path_single_kang = ops / total_kangs;	
 	double DPs_per_kang = path_single_kang / dp_val;
-	printf("Estimated DPs per kangaroo: %.3f.%s\r\n", DPs_per_kang, (DPs_per_kang < 10) ? " DP overhead is big, use less DP value if possible!" : "");
+	printf("Estimated DPs per kangaroo: %.3f.%s\r\n", DPs_per_kang, (DPs_per_kang < 5) ? " DP overhead is big, use less DP value if possible!" : "");
 
 	PntTotalOps = 0;
 	PntIndex = 0;
@@ -385,7 +384,10 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 //prepare GPUs
 	for (int i = 0; i < GpuCnt; i++)
 		if (!GpuKangs[i]->Prepare(PntToSolve, Range, DP, EcJumps1, EcJumps2, EcJumps3))
+		{
+			GpuKangs[i]->Failed = true;
 			printf("GPU %d Prepare failed\r\n", GpuKangs[i]->CudaIndex);
+		}
 
 	u64 tm0 = GetTickCount64();
 	printf("GPUs started...\r\n");
@@ -536,12 +538,18 @@ int main(int argc, char* argv[])
 #endif
 
 	printf("********************************************************************************\r\n");
-	printf("*                    RCKangaroo v1.1  (c) 2024 RetiredCoder                    *\r\n");
+	printf("*                    RCKangaroo v2.0  (c) 2024 RetiredCoder                    *\r\n");
 	printf("********************************************************************************\r\n\r\n");
 
 	printf("This software is free and open-source: https://github.com/RetiredC\r\n");
 	printf("It demonstrates fast GPU implementation of SOTA Kangaroo method for solving ECDLP\r\n");
-	printf("NOTE: Only RTX 40xx and 30xx cards are supported.\r\n\r\n");
+
+#ifdef _WIN32
+	printf("Windows version\r\n");
+#else
+	printf("Linux version\r\n");
+#endif
+
 #ifdef DEBUG_MODE
 	printf("DEBUG MODE\r\n\r\n");
 #endif

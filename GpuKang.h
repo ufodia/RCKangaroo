@@ -54,14 +54,17 @@ private:
 	bool Start();
 	void Release();
 #ifdef DEBUG_MODE
-	bool Dbg_CheckKangs();
+	int Dbg_CheckKangs();
 #endif
 public:
 	int persistingL2CacheMaxSize;
 	int CudaIndex; //gpu index in cuda
-	int KangCnt;
 	int mpCnt;
+	int KangCnt;
+	bool Failed;
+	bool IsOldGpu;
 
+	int CalcKangCnt();
 	bool Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3);
 	void Stop();
 	void Execute();

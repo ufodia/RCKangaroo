@@ -9,14 +9,13 @@ Discussion thread: https://bitcointalk.org/index.php?topic=5517607
 <b>Features:</b>
 
 - Lowest K=1.15, it means 1.8 times less required operations compared to classic method with K=2.1, also it means that you need 1.8 times less memory to store DPs.
-- Fast, about 8GKeys/s on RTX 4090.
+- Fast, about 8GKeys/s on RTX 4090, 4GKeys/s on RTX 3090.
 - Keeps DP overhead as small as possible.
 - Supports ranges up to 170 bits.
 - Both Windows and Linux are supported.
 
 <b>Limitations:</b>
 
-- Only RTX 40xx and 30xx GPUs are supported, but the software is optimized for 40xx only, so 30xx cards have bad speed.
 - No advanced features like networking, saving/loading DPs, etc.
 
 <b>Command line parameters:</b>
@@ -40,10 +39,23 @@ RCKangaroo.exe -dp 16 -range 84 -start 1000000000000000000000 -pubkey 0329c4574a
 
 <b>Some notes:</b>
 
-Fastest ECDLP solvers will always use SOTA method, as it's 1.39 times faster and requires less memory for DPs compared to the best 3-way kangaroos with K=1.6. 
+Fastest ECDLP solvers will always use SOTA method, as it's 1.4 times faster and requires less memory for DPs compared to the best 3-way kangaroos with K=1.6. 
 Even if you already have a faster implementation of kangaroo jumps, incorporating SOTA method will improve it further. 
-While adding the necessary loop-handling code will cause you to lose about 5–15% of your current speed, the SOTA method itself will provide a 39% performance increase. 
+While adding the necessary loop-handling code will cause you to lose about 5–15% of your current speed, the SOTA method itself will provide a 40% performance increase. 
 Overall, this translates to roughly a 25% net improvement, which should not be ignored if your goal is to build a truly fast solver. 
 
 
+<b>Changelog:</b>
 
+v2.0:
+
+- added support for 30xx, 20xx and 1xxx cards.
+- some minor changes.
+
+v1.1:
+
+- added ability to start software on 30xx cards.
+
+v1.0:
+
+- initial release.

@@ -526,6 +526,7 @@ __device__ __forceinline__ void InvModP(u32* res)
 	((u64*)modp)[2] = P_123;
 	((u64*)modp)[3] = P_123;
 	modp[8] = 0;
+	res[8] = 0;
 	val[0] = res[0]; val[1] = res[1]; val[2] = res[2]; val[3] = res[3];
 	val[4] = res[4]; val[5] = res[5]; val[6] = res[6]; val[7] = res[7];
 	val[8] = 0;

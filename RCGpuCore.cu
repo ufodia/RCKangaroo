@@ -24,6 +24,8 @@ extern __shared__ u64 LDS[];
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+#ifndef OLD_GPU
+
 //this kernel performs main jumps
 extern "C" __launch_bounds__(BLOCK_SIZE, 1)
 __global__ void KernelA(const TKparams Kparams)
@@ -38,7 +40,7 @@ __global__ void KernelA(const TKparams Kparams)
 	u64* x_last0 = Kparams.LastPnts + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
 	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
       
-	u64* jmp1_table = LDS; //64KB
+	u64* jmp1_table = LDS; //32KB
 	u16* lds_jlist = (u16*)&LDS[8 * JMP_CNT]; //4KB, must be aligned 16bytes
 
 	int i = THREAD_X;
@@ -200,6 +202,284 @@ __global__ void KernelA(const TKparams Kparams)
 	}
 } 
 
+#else
+
+#define LOAD_VAL_256_m(dst,p,i) { *((int4*)&(dst)[0]) = *((int4*)&(p)[4 * (i)]); *((int4*)&(dst)[2]) = *((int4*)&(p)[4 * (i) + 2]); }
+#define SAVE_VAL_256_m(p,src,i) { *((int4*)&(p)[4 * (i)]) = *((int4*)&(src)[0]); *((int4*)&(p)[4 * (i) + 2]) = *((int4*)&(src)[2]); }
+
+
+//this kernel performs main jumps for old cards
+//not good but works
+extern "C" __launch_bounds__(BLOCK_SIZE, 1)
+__global__ void KernelA(const TKparams Kparams)
+{
+	__align__(16) u64 Lx[4 * PNT_GROUP_CNT];
+	__align__(16) u64 Ly[4 * PNT_GROUP_CNT];
+	__align__(16) u64 Ls[4 * PNT_GROUP_CNT / 2]; //we store only half so need only half mem
+
+	//list of distances of performed jumps for KernelB
+	int4* jlist = (int4*)(Kparams.JumpsList + (u64)BLOCK_X * STEP_CNT * PNT_GROUP_CNT * BLOCK_SIZE / 4);
+	jlist += (THREAD_X / 32) * 32 * PNT_GROUP_CNT / 8;
+	//list of last visited points for KernelC
+	u64* x_last0 = Kparams.LastPnts + 2 * THREAD_X + 4 * BLOCK_SIZE * BLOCK_X;
+	u64* y_last0 = x_last0 + 4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE;
+
+	u64* jmp1_table = LDS; //32KB
+	u16* lds_jlist = (u16*)&LDS[8 * JMP_CNT]; //8KB, must be aligned 16bytes
+
+	int i = THREAD_X;
+	while (i < JMP_CNT)
+	{
+		*(int4*)&jmp1_table[8 * i + 0] = *(int4*)&Kparams.Jumps1[12 * i + 0];
+		*(int4*)&jmp1_table[8 * i + 2] = *(int4*)&Kparams.Jumps1[12 * i + 2];
+		*(int4*)&jmp1_table[8 * i + 4] = *(int4*)&Kparams.Jumps1[12 * i + 4];
+		*(int4*)&jmp1_table[8 * i + 6] = *(int4*)&Kparams.Jumps1[12 * i + 6];
+		i += BLOCK_SIZE;
+	}
+
+	__syncthreads();
+
+	__align__(16) u64 inverse[5];
+	__align__(16) u64 x[4], y[4], tmp[4], tmp2[4];
+	u64 dp_mask64 = ~((1ull << (64 - Kparams.DP)) - 1);
+	u16 jmp_ind;
+
+	//copy kangs from global to local
+	u32 kang_ind = PNT_GROUP_CNT * (THREAD_X + BLOCK_X * BLOCK_SIZE);
+	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
+	{
+		tmp[0] = Kparams.Kangs[(kang_ind + group) * 12 + 0];
+		tmp[1] = Kparams.Kangs[(kang_ind + group) * 12 + 1];
+		tmp[2] = Kparams.Kangs[(kang_ind + group) * 12 + 2];
+		tmp[3] = Kparams.Kangs[(kang_ind + group) * 12 + 3];
+		SAVE_VAL_256_m(Lx, tmp, group);
+		tmp[0] = Kparams.Kangs[(kang_ind + group) * 12 + 4];
+		tmp[1] = Kparams.Kangs[(kang_ind + group) * 12 + 5];
+		tmp[2] = Kparams.Kangs[(kang_ind + group) * 12 + 6];
+		tmp[3] = Kparams.Kangs[(kang_ind + group) * 12 + 7];
+		SAVE_VAL_256_m(Ly, tmp, group);
+	}
+
+	u64 L1S2 = ((u64*)Kparams.L1S2)[BLOCK_X * BLOCK_SIZE + THREAD_X];
+	u64* jmp_table;
+	__align__(16) u64 jmp_x[4];
+	__align__(16) u64 jmp_y[4];
+
+	//preparations (first calc for inv)
+	for (int group = 0; group < PNT_GROUP_CNT; group++)
+	{
+		LOAD_VAL_256_m(x, Lx, group);
+		jmp_ind = x[0] % JMP_CNT;
+		jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
+		Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+		SubModP(tmp, x, jmp_x);
+		if (group == 0)
+		{
+			Copy_u64_x4(inverse, tmp);
+			SAVE_VAL_256_m(Ls, tmp, 0);
+		}
+		else
+		{
+			MulModP(inverse, inverse, tmp);
+			if ((group & 1) == 0)
+				SAVE_VAL_256_m(Ls, inverse, group / 2);
+		}
+	}
+
+	//main loop
+	int g_beg = PNT_GROUP_CNT - 1; //start val
+	int g_end = -1; //first val after range
+	int g_inc = -1;
+	int s_mask = 1;
+	int jlast_add = 0;
+	__align__(16) u64 t_cache[4], x0_cache[4], jmpx_cached[4];
+	t_cache[0] = t_cache[1] = t_cache[2] = t_cache[3] = 0;
+	x0_cache[0] = x0_cache[1] = x0_cache[2] = x0_cache[3] = 0;
+
+	for (int step_ind = 0; step_ind < STEP_CNT; step_ind++)
+	{
+		__align__(16) u64 next_inv[4];
+
+		InvModP((u32*)inverse);
+
+		int group = g_beg;
+		bool cached = false;
+		while (group != g_end)
+		{
+			__align__(16) u64 dx[4], x0[4], y0[4], dx0[4];
+			if (cached)
+			{
+				Copy_u64_x4(x0, x0_cache);
+			}
+			else
+			{
+				LOAD_VAL_256_m(x0, Lx, group);
+			}
+			LOAD_VAL_256_m(y0, Ly, group);
+
+			jmp_ind = x0[0] % JMP_CNT;
+			jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
+			if (cached)
+			{
+				Copy_u64_x4(jmp_x, jmpx_cached); 
+			}
+			else
+			{
+				Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+			}
+			Copy_int4_x2(jmp_y, jmp_table + 8 * jmp_ind + 4);
+			u32 inv_flag = (u32)y0[0] & 1;
+			if (inv_flag)
+			{
+				jmp_ind |= INV_FLAG;
+				NegModP(jmp_y);
+			}
+
+			if (group == g_end - g_inc)
+			{
+				Copy_u64_x4(dx0, inverse);
+			}
+			else
+			{
+				if ((group & 1) == s_mask) //simple case
+				{
+					if (cached)
+					{
+						Copy_u64_x4(tmp, t_cache);
+						cached = false;
+					}
+					else
+					{
+						LOAD_VAL_256_m(tmp, Ls, (group + g_inc) / 2);
+					}
+				}
+				else //no s(-1), need to calc it
+				{
+					LOAD_VAL_256_m(t_cache, Ls, (group + g_inc + g_inc) / 2);
+					cached = true;				
+					LOAD_VAL_256_m(x0_cache, Lx, group + g_inc);
+					u32 jmp_tmp = x0_cache[0] % JMP_CNT;
+					__align__(16) u64 dx2[4];
+					u64* jmp_table_tmp = ((L1S2 >> (group + g_inc)) & 1) ? jmp2_table : jmp1_table;
+					Copy_int4_x2(jmpx_cached, jmp_table_tmp + 8 * jmp_tmp);
+					SubModP(dx2, x0_cache, jmpx_cached);
+					MulModP(tmp, t_cache, dx2); //t = s(-1)
+				}
+
+				SubModP(dx, x0, jmp_x);
+				MulModP(dx0, tmp, inverse);
+				MulModP(inverse, inverse, dx);
+			}
+
+			SubModP(tmp2, y0, jmp_y);
+			MulModP(tmp, tmp2, dx0);
+			SqrModP(tmp2, tmp);
+
+			SubModP(x, tmp2, jmp_x);
+			SubModP(x, x, x0);
+			SAVE_VAL_256_m(Lx, x, group);
+
+			SubModP(y, x0, x);
+			MulModP(y, y, tmp);
+			SubModP(y, y, y0);
+			SAVE_VAL_256_m(Ly, y, group);
+
+			if (((L1S2 >> group) & 1) == 0) //normal mode, check L1S2 loop
+			{
+				u32 jmp_next = x[0] % JMP_CNT;
+				jmp_next |= ((u32)y[0] & 1) ? 0 : INV_FLAG; //inverted
+				L1S2 |= (jmp_ind == jmp_next) ? (1ull << group) : 0; //loop L1S2 detected
+			}
+			else
+			{
+				L1S2 &= ~(1ull << group);
+				jmp_ind |= JMP2_FLAG;
+			}
+
+			if ((x[3] & dp_mask64) == 0)
+			{
+				u32 kang_ind = (THREAD_X + BLOCK_X * BLOCK_SIZE) * PNT_GROUP_CNT + group;
+				u32 ind = atomicAdd(Kparams.DPTable + kang_ind, 1);
+				ind = min(ind, DPTABLE_MAX_CNT - 1);
+				int4* dst = (int4*)(Kparams.DPTable + Kparams.KangCnt + (kang_ind * DPTABLE_MAX_CNT + ind) * 4);
+				dst[0] = ((int4*)x)[0];
+				jmp_ind |= DP_FLAG;
+			}
+
+			lds_jlist[8 * THREAD_X + (group % 8)] = jmp_ind;
+			if (((group + jlast_add) % 8) == 0)
+				st_cs_v4_b32(&jlist[(group / 8) * 32 + (THREAD_X % 32)], *(int4*)&lds_jlist[8 * THREAD_X]); //skip L2 cache
+
+			if (step_ind + MD_LEN >= STEP_CNT) //store last kangs to be able to find loop exit point
+			{
+				int n = step_ind + MD_LEN - STEP_CNT;
+				u64* x_last = x_last0 + n * 2 * (4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE);
+				u64* y_last = y_last0 + n * 2 * (4 * PNT_GROUP_CNT * BLOCK_CNT * BLOCK_SIZE);
+				SAVE_VAL_256(x_last, x, group);
+				SAVE_VAL_256(y_last, y, group);
+			}
+		
+			//preps to calc next inv
+			jmp_ind = x[0] % JMP_CNT;
+			jmp_table = ((L1S2 >> group) & 1) ? jmp2_table : jmp1_table;
+			Copy_int4_x2(jmp_x, jmp_table + 8 * jmp_ind);
+			SubModP(dx, x, jmp_x);
+			if (group == g_beg)
+			{
+				Copy_u64_x4(next_inv, dx);
+				SAVE_VAL_256_m(Ls, dx, g_beg / 2);
+			}
+			else
+			{
+				MulModP(next_inv, next_inv, dx);
+				if ((group & 1) == s_mask)
+				{
+					SAVE_VAL_256_m(Ls, next_inv, group / 2);
+				}
+			}
+
+			group += g_inc;
+		} //group
+		jlist += PNT_GROUP_CNT * BLOCK_SIZE / 8;
+		Copy_u64_x4(inverse, next_inv);
+		if (g_inc < 0) //invert direction
+		{
+			g_beg = 0;
+			g_end = PNT_GROUP_CNT;
+			g_inc = 1;
+			s_mask = 0;
+			jlast_add = 1;
+		}
+		else
+		{
+			g_beg = PNT_GROUP_CNT - 1;
+			g_end = -1;
+			g_inc = -1;
+			s_mask = 1;
+			jlast_add = 0;
+		}
+	}
+
+	((u64*)Kparams.L1S2)[BLOCK_X * BLOCK_SIZE + THREAD_X] = L1S2;
+	//copy kangs from local to global
+	kang_ind = PNT_GROUP_CNT * (THREAD_X + BLOCK_X * BLOCK_SIZE);
+	for (u32 group = 0; group < PNT_GROUP_CNT; group++)
+	{
+		LOAD_VAL_256_m(tmp, Lx, group);
+		Kparams.Kangs[(kang_ind + group) * 12 + 0] = tmp[0];
+		Kparams.Kangs[(kang_ind + group) * 12 + 1] = tmp[1];
+		Kparams.Kangs[(kang_ind + group) * 12 + 2] = tmp[2];
+		Kparams.Kangs[(kang_ind + group) * 12 + 3] = tmp[3];
+		LOAD_VAL_256_m(tmp, Ly, group);
+		Kparams.Kangs[(kang_ind + group) * 12 + 4] = tmp[0];
+		Kparams.Kangs[(kang_ind + group) * 12 + 5] = tmp[1];
+		Kparams.Kangs[(kang_ind + group) * 12 + 6] = tmp[2];
+		Kparams.Kangs[(kang_ind + group) * 12 + 7] = tmp[3];
+	}
+}
+
+#endif
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u64* d)
@@ -218,9 +498,10 @@ __device__ __forceinline__ void BuildDP(const TKparams& Kparams, int kang_ind, u
 	DPs[10] = 3 * kang_ind / Kparams.KangCnt; //kang type
 }
 
-__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind)
+__device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64* d, u32 kang_ind, u64* jmp1_d, u64* jmp2_d, const TKparams& Kparams, u64* table, u32* cur_ind, u8 iter)
 {
 	u64* jmp_d = (d_cur & JMP2_FLAG) ? jmp2_d : jmp1_d;
+
 	__align__(16) u64 jmp[3];
 	((int4*)(jmp))[0] = ((int4*)(jmp_d + 4 * (d_cur & JMP_MASK)))[0];
 	jmp[2] = *(jmp_d + 4 * (d_cur & JMP_MASK) + 2);
@@ -231,10 +512,12 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 		Add192to192(d, jmp);
 
 	//check in table
-	int found_ind;
+	int found_ind = iter + MD_LEN - 4;
 	while (1)
 	{
-		found_ind = (int)*cur_ind + MD_LEN - 4;
+		if (table[found_ind % MD_LEN] == d[0])
+			break;
+		found_ind -= 2;
 		if (table[found_ind % MD_LEN] == d[0])
 			break;
 		found_ind -= 2;
@@ -246,17 +529,17 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 		found_ind = -1;
 		break;
 	}
-	table[*cur_ind] = d[0];
+	table[iter] = d[0];
 
 	if (found_ind < 0)
 	{
-		*cur_ind = (*cur_ind + 1) % MD_LEN;
+		*cur_ind = (iter + 1) % MD_LEN;
 		if (d_cur & DP_FLAG)
 			BuildDP(Kparams, kang_ind, d);
 		return false;
 	}
 
-	u32 LoopSize = (*cur_ind + MD_LEN - found_ind) % MD_LEN;
+	u32 LoopSize = (iter + MD_LEN - found_ind) % MD_LEN;
 	if (!LoopSize)
 		LoopSize = MD_LEN;
 	atomicAdd(Kparams.dbg_buf + LoopSize, 1); //dbg
@@ -265,24 +548,35 @@ __device__ __forceinline__ bool ProcessJumpDistance(u32 step_ind, u32 d_cur, u64
 	u32 ind_LastPnts = MD_LEN - 1 - ((STEP_CNT - 1 - step_ind) % LoopSize);
 	u32 ind = atomicAdd(Kparams.LoopedKangs, 1);
 	Kparams.LoopedKangs[2 + ind] = kang_ind | (ind_LastPnts << 24);
-	*cur_ind = (*cur_ind + 1) % MD_LEN;
+	*cur_ind = (iter + 1) % MD_LEN;
 	return true;
 }
 
+#define DO_ITER(iter) {\
+	u32 cur_dAB = jlist[THREAD_X]; \
+	u16 cur_dA = cur_dAB & 0xFFFF; \
+	u16 cur_dB = cur_dAB >> 16; \
+	if (!LoopedA) \
+		LoopedA = ProcessJumpDistance(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, RegsA, &cur_indA, iter); \
+	if (!LoopedB) \
+		LoopedB = ProcessJumpDistance(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, RegsB, &cur_indB, iter); \
+	jlist += BLOCK_SIZE * PNT_GROUP_CNT / 2; \
+	step_ind++; \
+}
+
 //this kernel counts distances and detects loops Size>2
-//Loops Level1 statistics for JMP_CNT=1024: L1S2 = 1/2048 (so one loop every 2048 jumps), L1S4 = L1S2/2048, L1S6 = L1S4/512, L1S8 = L1S6/316, L1S10 = L1S8/164. 
-// For RTX4090 at 8HG/s for 24 hours: jumps = 691200bln, L1S2 = 341.5bln, L1S4 = 166.7mln, L1S6 = 326k, L1S8 = 1030, L1S10 = 6.3.
-// I don't see any reasons to catch L1S10 because we have 786432 kangs, if we lose 6.3 kangs every day, we lose 2300 kangs a year which is about 0.3%.
+//Loops Level1 statistics for JMP_CNT=512: L1S2 = 1/1024 (so one loop every 1024 jumps), L1S4 = L1S2/1024, L1S6 = L1S4/256, L1S8 = L1S6/158, L1S10 = L1S8/82. L1S12 = L1S10/50. 
+// For RTX4090 at 8HG/s for 24 hours and JMP_CNT=512: jumps = 691200bln, L1S2 = 682bln, L1S4 = 666mln, L1S6 = 2.6mln, L1S8 = 16.5k, L1S10 = 201. L1S12 = 4.
+// I don't see any reasons to catch L1S12 because we have 786432 kangs, if we lose 4 kangs every day, we lose 1460 kangs a year which is about 0.19%.
 // This degradation depends only on speed of a single kangaroo, so it's about the same for all 40xx GPUs (50xx GPUs will have +20% clock speed may be).
-// Since we lose kangs gradually, for a year we lose 0.3/2 = 0.15% of speed, so you should catch L1S10 only if you are going to solve same point for decades.
+// Since we lose kangs gradually, for a year we lose 0.19/2 = 0.1% of speed, so you should catch L1S12 only if you are going to solve same point for decades.
 // Or you can check all kangs for L1S10 on CPU once a day and restart looped kangs.
 // Level2 loops are very rare and they have even size too so they will be handled by the same code. We don't know what loop level we catch so we use JmpTable3 for escaping.
 extern "C" __launch_bounds__(BLOCK_SIZE, 1)
 __global__ void KernelB(const TKparams Kparams)
 {
-	u64* jmp1_d = LDS; //32KB, 192bit jumps
-	u64* jmp2_d = LDS + 4 * JMP_CNT; //32KB, 192bit jumps
-	u64* table = LDS + 8 * JMP_CNT + 17 * THREAD_X; //34KB. we need 16 only, 17th to avoid bank conflicts
+	u64* jmp1_d = LDS; //16KB, 192bit jumps
+	u64* jmp2_d = LDS + 4 * JMP_CNT; //16KB, 192bit jumps
 
 	int i = THREAD_X;
 	while (i < JMP_CNT)
@@ -301,14 +595,19 @@ __global__ void KernelB(const TKparams Kparams)
 
 	__syncthreads();
 
+	u64 RegsA[MD_LEN], RegsB[MD_LEN];
+
 	//we process two kangs at once
 	for (u32 gr_ind2 = 0; gr_ind2 < PNT_GROUP_CNT/2; gr_ind2++)
-	{
-		for (u32 i = 0; i < 16; i++)
-			table[i] = Kparams.LoopTable[17 * BLOCK_SIZE * (PNT_GROUP_CNT / 2) * BLOCK_X + 17 * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + BLOCK_X];
-		u64 cur_indAB = Kparams.LoopTable[17 * BLOCK_SIZE * (PNT_GROUP_CNT / 2) * BLOCK_X + 17 * BLOCK_SIZE * gr_ind2 + 16 * BLOCK_SIZE + BLOCK_X];
-		u32 cur_indA = (u32)cur_indAB;
-		u32 cur_indB = cur_indAB >> 32;
+	{	
+		#pragma unroll
+		for (int i = 0; i < MD_LEN; i++)
+		{
+			RegsA[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + BLOCK_X];
+			RegsB[i] = Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (i + MD_LEN) * BLOCK_SIZE + BLOCK_X];
+		}
+		u32 cur_indA = 0;
+		u32 cur_indB = 0;
 
 		u32* jlist = jlist0 + gr_ind2 * BLOCK_SIZE;
 
@@ -329,21 +628,22 @@ __global__ void KernelB(const TKparams Kparams)
 		dB[0] = Kparams.Kangs[(kang_ind + 1) * 12 + 8];
 		dB[1] = Kparams.Kangs[(kang_ind + 1) * 12 + 9];
 		dB[2] = Kparams.Kangs[(kang_ind + 1) * 12 + 10];
-	
+
 		bool LoopedA = false;
 		bool LoopedB = false;
-		for (u32 step_ind = 0; step_ind < STEP_CNT; step_ind++)
+		u32 step_ind = 0;
+		while (step_ind < STEP_CNT)
 		{
-			u32 cur_dAB = jlist[THREAD_X];
-			u16 cur_dA = cur_dAB & 0xFFFF;
-			u16 cur_dB = cur_dAB >> 16;
-			
-			if (!LoopedA)
-				LoopedA = ProcessJumpDistance(step_ind, cur_dA, dA, kang_ind, jmp1_d, jmp2_d, Kparams, table, &cur_indA);
-			if (!LoopedB)
-				LoopedB = ProcessJumpDistance(step_ind, cur_dB, dB, kang_ind + 1, jmp1_d, jmp2_d, Kparams, table + 8, &cur_indB);
-
-			jlist += BLOCK_SIZE * PNT_GROUP_CNT / 2;
+			DO_ITER(0);
+			DO_ITER(1);
+			DO_ITER(2);
+			DO_ITER(3);
+			DO_ITER(4);
+			DO_ITER(5);
+			DO_ITER(6);
+			DO_ITER(7);
+			DO_ITER(8);
+			DO_ITER(9);
 		}
 
 		Kparams.Kangs[kang_ind * 12 + 8] = dA[0];
@@ -353,9 +653,15 @@ __global__ void KernelB(const TKparams Kparams)
 		Kparams.Kangs[(kang_ind + 1) * 12 + 9] = dB[1];
 		Kparams.Kangs[(kang_ind + 1) * 12 + 10] = dB[2];
 
-		for (u32 i = 0; i < 16; i++)
-			Kparams.LoopTable[17 * BLOCK_SIZE * (PNT_GROUP_CNT / 2) * BLOCK_X + 17 * BLOCK_SIZE * gr_ind2 + i * BLOCK_SIZE + BLOCK_X] = table[i];
-		Kparams.LoopTable[17 * BLOCK_SIZE * (PNT_GROUP_CNT / 2) * BLOCK_X + 17 * BLOCK_SIZE * gr_ind2 + 16 * BLOCK_SIZE + BLOCK_X] = cur_indA | (((u64)cur_indB) << 32);
+		//store so cur_ind is 0 at next loading
+		#pragma unroll
+		for (int i = 0; i < MD_LEN; i++)
+		{
+			int ind = (i + MD_LEN - cur_indA) % MD_LEN;
+			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + ind * BLOCK_SIZE + BLOCK_X] = RegsA[i];
+			ind = (i + MD_LEN - cur_indB) % MD_LEN;
+			Kparams.LoopTable[MD_LEN * BLOCK_SIZE * PNT_GROUP_CNT * BLOCK_X + 2 * MD_LEN * BLOCK_SIZE * gr_ind2 + (ind + MD_LEN) * BLOCK_SIZE + BLOCK_X] = RegsB[i];
+		}
 	}
 }
 
@@ -363,7 +669,7 @@ __global__ void KernelB(const TKparams Kparams)
 extern "C" __launch_bounds__(BLOCK_SIZE, 1)
 __global__ void KernelC(const TKparams Kparams)
 {
-	u64* jmp3_table = LDS; //96KB
+	u64* jmp3_table = LDS; //48KB
 
 	int i = THREAD_X;
 	while (i < JMP_CNT)
@@ -577,25 +883,25 @@ __global__ void KernelGen(const TKparams Kparams)
 
 void CallGpuKernelABC(TKparams Kparams)
 {
-	KernelA <<< Kparams.BlockCnt, BLOCK_SIZE, LDS_SIZE_A >>> (Kparams);
-	KernelB <<< Kparams.BlockCnt, BLOCK_SIZE, LDS_SIZE_B >>> (Kparams);
-	KernelC <<< Kparams.BlockCnt, BLOCK_SIZE, LDS_SIZE_C >>> (Kparams);
+	KernelA <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelA_LDS_Size >>> (Kparams);
+	KernelB <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelB_LDS_Size >>> (Kparams);
+	KernelC <<< Kparams.BlockCnt, Kparams.BlockSize, Kparams.KernelC_LDS_Size >>> (Kparams);
 }
 
 void CallGpuKernelGen(TKparams Kparams)
 {
-	KernelGen << < Kparams.BlockCnt, BLOCK_SIZE, 0 >> > (Kparams);
+	KernelGen << < Kparams.BlockCnt, Kparams.BlockSize, 0 >> > (Kparams);
 }
 
-cudaError_t cuSetGpuParams(u64* _jmp2_table)
+cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table)
 {
-	cudaError_t err = cudaFuncSetAttribute(KernelA, cudaFuncAttributeMaxDynamicSharedMemorySize, LDS_SIZE_A);
+	cudaError_t err = cudaFuncSetAttribute(KernelA, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelA_LDS_Size);
 	if (err != cudaSuccess)
 		return err;
-	err = cudaFuncSetAttribute(KernelB, cudaFuncAttributeMaxDynamicSharedMemorySize, LDS_SIZE_B);
+	err = cudaFuncSetAttribute(KernelB, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelB_LDS_Size);
 	if (err != cudaSuccess)
 		return err;
-	err = cudaFuncSetAttribute(KernelC, cudaFuncAttributeMaxDynamicSharedMemorySize, LDS_SIZE_C);
+	err = cudaFuncSetAttribute(KernelC, cudaFuncAttributeMaxDynamicSharedMemorySize, Kparams.KernelC_LDS_Size);
 	if (err != cudaSuccess)
 		return err;
 	err = cudaMemcpyToSymbol(jmp2_table, _jmp2_table, JMP_CNT * 64);

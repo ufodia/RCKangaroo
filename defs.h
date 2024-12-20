@@ -18,15 +18,31 @@ typedef unsigned char u8;
 typedef char i8;
 
 
+
 #define MAX_GPU_CNT			32
-#define BLOCK_SIZE			256
 
-//must be divisible by 8
-#define PNT_GROUP_CNT		24
+//must be divisible by MD_LEN
+#define STEP_CNT			500
+#define JMP_CNT				512
 
-#define LDS_SIZE_A			(68 * 1024)
-#define LDS_SIZE_B			(98 * 1024)
-#define LDS_SIZE_C			(96 * 1024)
+//use different options for cards older than RTX 40xx
+#ifdef __CUDA_ARCH__
+	#if __CUDA_ARCH__ < 890
+		#define OLD_GPU
+	#endif
+	#ifdef OLD_GPU
+		#define BLOCK_SIZE			512
+		//can be 8, 16, 24, 32, 40, 48, 56, 64
+		#define PNT_GROUP_CNT		64	
+	#else
+		#define BLOCK_SIZE			256
+		//can be 8, 16, 24, 32
+		#define PNT_GROUP_CNT		24
+	#endif
+#else //CPU, fake values
+	#define BLOCK_SIZE			512
+	#define PNT_GROUP_CNT		64
+#endif
 
 // kang type
 #define TAME				0  // Tame kangs
@@ -36,11 +52,9 @@ typedef char i8;
 #define GPU_DP_SIZE			48
 #define MAX_DP_CNT			(256 * 1024)
 
-//same for all tables
-#define JMP_CNT				1024
 #define JMP_MASK			(JMP_CNT-1)
 
-#define DPTABLE_MAX_CNT		64
+#define DPTABLE_MAX_CNT		16
 
 #define MAX_CNT_LIST		(512 * 1024)
 
@@ -48,9 +62,7 @@ typedef char i8;
 #define INV_FLAG			0x4000
 #define JMP2_FLAG			0x2000
 
-#define STEP_CNT			2048
-
-#define MD_LEN				8
+#define MD_LEN				10
 
 //#define DEBUG_MODE
 
@@ -60,6 +72,8 @@ struct TKparams
 	u64* Kangs;
 	u32 KangCnt;
 	u32 BlockCnt;
+	u32 BlockSize;
+	u32 GroupCnt;
 	u64* L2;
 	u64 DP;
 	u32* DPs_out;
@@ -73,5 +87,9 @@ struct TKparams
 	u64* LoopTable;
 	u32* dbg_buf;
 	u32* LoopedKangs;
+
+	u32 KernelA_LDS_Size;
+	u32 KernelB_LDS_Size;
+	u32 KernelC_LDS_Size;	
 };
 

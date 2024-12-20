@@ -10,10 +10,18 @@
 
 #include "GpuKang.h"
 
-cudaError_t cuSetGpuParams(u64* _jmp2_table);
+cudaError_t cuSetGpuParams(TKparams Kparams, u64* _jmp2_table);
 void CallGpuKernelGen(TKparams Kparams);
 void CallGpuKernelABC(TKparams Kparams);
 void AddPointsToList(u32* data, int cnt, u64 ops_cnt);
+
+int RCGpuKang::CalcKangCnt()
+{
+	Kparams.BlockCnt = mpCnt;
+	Kparams.BlockSize = IsOldGpu ? 512 : 256;
+	Kparams.GroupCnt = IsOldGpu ? 64 : 24;
+	return Kparams.BlockSize* Kparams.GroupCnt* Kparams.BlockCnt;
+}
 
 //executes in main thread
 bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJumps1, EcJMP* _EcJumps2, EcJMP* _EcJumps3)
@@ -25,6 +33,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	EcJumps2 = _EcJumps2;
 	EcJumps3 = _EcJumps3;
 	StopFlag = false;
+	Failed = false;
 	u64 total_mem = 0;
 	memset(dbg, 0, sizeof(dbg));
 	memset(SpeedStats, 0, sizeof(SpeedStats));
@@ -36,49 +45,58 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 
 	Kparams.BlockCnt = mpCnt;
-	Kparams.DP = DP;
+	Kparams.BlockSize = IsOldGpu ? 512 : 256;
+	Kparams.GroupCnt = IsOldGpu ? 64 : 24;
+	KangCnt = Kparams.BlockSize * Kparams.GroupCnt * Kparams.BlockCnt;
 	Kparams.KangCnt = KangCnt;
+	Kparams.DP = DP;
+	Kparams.KernelA_LDS_Size = 64 * JMP_CNT + 16 * Kparams.BlockSize;
+	Kparams.KernelB_LDS_Size = 64 * JMP_CNT;
+	Kparams.KernelC_LDS_Size = 96 * JMP_CNT;	
 
 //allocate gpu mem
-	//L2	
-	int L2size = KangCnt * (3 * 32);
-	total_mem += L2size;
-	err = cudaMalloc((void**)&Kparams.L2, L2size);
-	if (err != cudaSuccess)
+	u64 size;
+	if (!IsOldGpu)
 	{
-		printf("GPU %d, Allocate L2 memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
-		return false;
+		//L2	
+		int L2size = Kparams.KangCnt * (3 * 32);
+		total_mem += L2size;
+		err = cudaMalloc((void**)&Kparams.L2, L2size);
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d, Allocate L2 memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
+			return false;
+		}
+		size = L2size;
+		if (size > persistingL2CacheMaxSize)
+			size = persistingL2CacheMaxSize;
+		err = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, size); // set max allowed size for L2
+		//persisting for L2
+		cudaStreamAttrValue stream_attribute;                                                   
+		stream_attribute.accessPolicyWindow.base_ptr = Kparams.L2;
+		stream_attribute.accessPolicyWindow.num_bytes = size;										
+		stream_attribute.accessPolicyWindow.hitRatio = 1.0;                                     
+		stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;             
+		stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;  	
+		err = cudaStreamSetAttribute(NULL, cudaStreamAttributeAccessPolicyWindow, &stream_attribute);
+		if (err != cudaSuccess)
+		{
+			printf("GPU %d, cudaStreamSetAttribute failed: %s\n", CudaIndex, cudaGetErrorString(err));
+			return false;
+		}
 	}
-	u64 size = L2size;
-        if (size > persistingL2CacheMaxSize)
-            size = persistingL2CacheMaxSize;
-	err = cudaDeviceSetLimit(cudaLimitPersistingL2CacheSize, size); // set max allowed size for L2
-
-	//persisting for L2
-	cudaStreamAttrValue stream_attribute;                                                   
-	stream_attribute.accessPolicyWindow.base_ptr = Kparams.L2;
-	stream_attribute.accessPolicyWindow.num_bytes = size;										
-	stream_attribute.accessPolicyWindow.hitRatio = 1.0;                                     
-	stream_attribute.accessPolicyWindow.hitProp = cudaAccessPropertyPersisting;             
-	stream_attribute.accessPolicyWindow.missProp = cudaAccessPropertyStreaming;         
-	err = cudaStreamSetAttribute(NULL, cudaStreamAttributeAccessPolicyWindow, &stream_attribute); 
-	if (err != cudaSuccess)
-	{
-		printf("GPU %d, cudaStreamSetAttribute failed: %s\n", CudaIndex, cudaGetErrorString(err));
-		return false;
-	}
-
-	total_mem += MAX_DP_CNT * GPU_DP_SIZE + 16;
-	err = cudaMalloc((void**)&Kparams.DPs_out, MAX_DP_CNT * GPU_DP_SIZE + 16);
+	size = MAX_DP_CNT * GPU_DP_SIZE + 16;
+	total_mem += size;
+	err = cudaMalloc((void**)&Kparams.DPs_out, size);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d Allocate GpuOut memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
 
-	int kang_size = KangCnt * 96;
-	total_mem += kang_size;
-	err = cudaMalloc((void**)&Kparams.Kangs, kang_size);
+	size = KangCnt * 96;
+	total_mem += size;
+	err = cudaMalloc((void**)&Kparams.Kangs, size);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d Allocate pKangs memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
@@ -118,7 +136,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	size = (u64)KangCnt * (16 * DPTABLE_MAX_CNT + 4);
+	size = (u64)KangCnt * (16 * DPTABLE_MAX_CNT + sizeof(u32)); //we store 16bytes of X
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.DPTable, size);
 	if (err != cudaSuccess)
@@ -127,15 +145,16 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	total_mem += mpCnt * BLOCK_SIZE * 4;
-	err = cudaMalloc((void**)&Kparams.L1S2, mpCnt * BLOCK_SIZE * 4);
+	size = mpCnt * Kparams.BlockSize * sizeof(u64);
+	total_mem += size;
+	err = cudaMalloc((void**)&Kparams.L1S2, size);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d Allocate L1S2 memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
 		return false;
 	}
 
-	size = MD_LEN * KangCnt * (2 * 32);
+	size = (u64)KangCnt * MD_LEN * (2 * 32);
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.LastPnts, size);
 	if (err != cudaSuccess)
@@ -144,7 +163,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	size = (KangCnt / 2) * 17 * 8;
+	size = (u64)KangCnt * MD_LEN * sizeof(u64);
 	total_mem += size;
 	err = cudaMalloc((void**)&Kparams.LoopTable, size);
 	if (err != cudaSuccess)
@@ -161,8 +180,9 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 
-	total_mem += 4 * KangCnt + 8;
-	err = cudaMalloc((void**)&Kparams.LoopedKangs, 4 * KangCnt + 8);
+	size = sizeof(u32) * KangCnt + 8;
+	total_mem += size;
+	err = cudaMalloc((void**)&Kparams.LoopedKangs, size);
 	if (err != cudaSuccess)
 	{
 		printf("GPU %d Allocate LoopedKangs memory failed: %s\n", CudaIndex, cudaGetErrorString(err));
@@ -204,7 +224,8 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 		return false;
 	}
 	free(buf);
-	err = cuSetGpuParams(jmp2_table);
+
+	err = cuSetGpuParams(Kparams, jmp2_table);
 	if (err != cudaSuccess)
 	{
 		free(jmp2_table);
@@ -228,7 +249,7 @@ bool RCGpuKang::Prepare(EcPoint _PntToSolve, int _Range, int _DP, EcJMP* _EcJump
 	}
 	free(buf);
 
-	printf("GPU %d: allocated %llu MB, %d kangaroos.\r\n", CudaIndex, total_mem / (1024 * 1024), KangCnt);
+	printf("GPU %d: allocated %llu MB, %d kangaroos. OldGpuMode: %s\r\n", CudaIndex, total_mem / (1024 * 1024), KangCnt, IsOldGpu ? "Yes" : "No");
 	return true;
 }
 
@@ -248,7 +269,8 @@ void RCGpuKang::Release()
 	cudaFree(Kparams.Jumps1);
 	cudaFree(Kparams.Kangs);
 	cudaFree(Kparams.DPs_out);
-	cudaFree(Kparams.L2);
+	if (!IsOldGpu)
+		cudaFree(Kparams.L2);
 }
 
 void RCGpuKang::Stop()
@@ -274,6 +296,9 @@ void RCGpuKang::GenerateRndDistances()
 
 bool RCGpuKang::Start()
 {
+	if (Failed)
+		return false;
+
 	cudaError_t err;
 	err = cudaSetDevice(CudaIndex);
 	if (err != cudaSuccess)
@@ -348,20 +373,21 @@ bool RCGpuKang::Start()
 	}
 	CallGpuKernelGen(Kparams);
 
-	err = cudaMemset(Kparams.L1S2, 0, mpCnt * BLOCK_SIZE * 4);
+	err = cudaMemset(Kparams.L1S2, 0, mpCnt * Kparams.BlockSize * 8);
 	if (err != cudaSuccess)
 		return false;
 	cudaMemset(Kparams.dbg_buf, 0, 1024);
-	cudaMemset(Kparams.LoopTable, 0, (mpCnt * BLOCK_SIZE) * 17 * 8 * PNT_GROUP_CNT / 2);
+	cudaMemset(Kparams.LoopTable, 0, KangCnt * MD_LEN * sizeof(u64));
 	return true;
 }
 
 #ifdef DEBUG_MODE
-bool RCGpuKang::Dbg_CheckKangs()
+int RCGpuKang::Dbg_CheckKangs()
 {
-	int kang_size = mpCnt * BLOCK_SIZE * PNT_GROUP_CNT * 96;
+	int kang_size = mpCnt * Kparams.BlockSize * Kparams.GroupCnt * 96;
 	u64* kangs = (u64*)malloc(kang_size);
 	cudaError_t err = cudaMemcpy(kangs, Kparams.Kangs, kang_size, cudaMemcpyDeviceToHost);
+	int res = 0;
 	for (int i = 0; i < KangCnt; i++)
 	{
 		EcPoint Pnt, p;
@@ -387,13 +413,10 @@ bool RCGpuKang::Dbg_CheckKangs()
 			else
 				p = ec.AddPoints(PntB, p);
 		if (!p.IsEqual(Pnt))
-		{
-			free(kangs);
-			return false;
-		}
+			res++
 	}
 	free(kangs);
-	return true;
+	return res;
 }
 #endif
 
@@ -417,7 +440,7 @@ void RCGpuKang::Execute()
 	{
 		u64 t1 = GetTickCount64();
 		cudaMemset(Kparams.DPs_out, 0, 4);
-		cudaMemset(Kparams.DPTable, 0, KangCnt * 4);
+		cudaMemset(Kparams.DPTable, 0, KangCnt * sizeof(u32));
 		cudaMemset(Kparams.LoopedKangs, 0, 8);
 		CallGpuKernelABC(Kparams);
 		int cnt;
@@ -467,13 +490,14 @@ void RCGpuKang::Execute()
 #ifdef DEBUG_MODE
 		if ((iter % 300) == 0)
 		{
-			if (!Dbg_CheckKangs())
+			int corr_cnt = Dbg_CheckKangs();
+			if (corr_cnt)
 			{
-				printf("DBG: GPU %d, KANGS CORRUPTED!\r\n", CudaIndex);
+				printf("DBG: GPU %d, KANGS CORRUPTED: %d\r\n", CudaIndex, corr_cnt);
 				gTotalErrors++;
 			}
 			else
-				printf("DBG: GPU %d, KANGS OK!\r\n", CudaIndex);
+				printf("DBG: GPU %d, ALL KANGS OK!\r\n", CudaIndex);
 		}
 		iter++;
 #endif
