@@ -413,7 +413,7 @@ int RCGpuKang::Dbg_CheckKangs()
 			else
 				p = ec.AddPoints(PntB, p);
 		if (!p.IsEqual(Pnt))
-			res++
+			res++;
 	}
 	free(kangs);
 	return res;
