@@ -317,7 +317,7 @@ bool SolvePoint(EcPoint PntToSolve, int Range, int DP, EcInt* pk_res)
 	}
 
 	printf("\r\nSolving point: Range %d bits, DP %d, start...\r\n", Range, DP);
-	double ops = 1.15 * pow(2.0, Range / 2);
+	double ops = 1.15 * pow(2.0, (double)Range / 2);
 	double dp_val = (double)(1ull << DP);
 	double ram = (32 + 4 + 4) * ops / dp_val; //+4 for grow allocation and memory fragmentation
 	ram += sizeof(TListRec) * 256 * 256 * 256; //3byte-prefix table
